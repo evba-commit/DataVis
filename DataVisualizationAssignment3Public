@@ -1,0 +1,302 @@
+%%capture
+!pip install panel hvplot pandas numpy jupyter_bokeh
+
+import holoviews as hv
+import hvplot.pandas
+import numpy as np
+import pandas as pd
+import panel as pn
+from bokeh.palettes import Category10
+from scipy import stats
+
+pn.extension()
+
+# load in the Death Counts Dataset as a pandas df
+df = pd.read_csv("/voc/work/death_counts.csv")
+print(df.head())
+
+# remove columns
+df = df.drop(
+    columns=[
+        "Data As Of",
+        "Start Date",
+        "End Date",
+        "MMWR Week",
+        "Jurisdiction of Occurrence",
+        "Week-Ending Date",
+    ]
+)
+
+# rename some of the columns I want to keep
+df = df.rename(
+    columns={
+        "Year": "year",
+        "Race and Hispanic Origin Group": "race",
+        "Age Group": "age_group",
+        "COVID-19 Deaths": "covid_deaths",
+        "Total Deaths": "total_deaths",
+    }
+)
+
+# look at our new df
+print(df.head())
+
+# Use .select_dtypes to categorize our columns into categoric and numeric
+numeric_cols = list(df.select_dtypes(include=[np.number]).columns)
+categorical_cols = list(df.select_dtypes(exclude=[np.number]).columns)
+
+# look
+print("\n📊 Numeric columns:", numeric_cols)
+print("📝 Categorical columns:", categorical_cols)
+
+# Let's create a data summary using dictionary comprehension
+data_summary = {
+    col: {
+        "type": str(df[col].dtype),
+        "missing": df[col].isna().sum(),
+        "unique_values": len(df[col].unique()),
+    }
+    for col in df.columns
+}
+
+# convert this summary to a DataFrame
+print("\n📈 Detailed Data Summary:")
+display(pd.DataFrame(data_summary).T)
+
+# lets see if we can get insight on our two numeric vars
+# We can use the pandas .kurt to measure normality
+print(df["covid_deaths"].kurt())
+print(df["total_deaths"].kurt())
+
+# So both variables are far from normal
+# we shouldn't expect a symmetric hystogram for either
+
+# Create our grouping selector
+select_group = pn.widgets.Select(
+    # ADVANCED FEATURE: Using filter() with lambda
+    # We only want categorical columns that have a reasonable number of unique values
+    options=list(filter(lambda x: df[x].nunique() < 11, df.columns)),
+    name="Group By",
+    value="year",
+)
+
+# create variable seector
+select_var = pn.widgets.Select(
+    name="Variable", options=["covid_deaths", "total_deaths"], value="covid_deaths"
+)
+
+# create size selector
+size_var = pn.widgets.Select(
+    name="Size Variable", options=["covid_deaths", "total_deaths"], value="covid_deaths"
+)
+
+# display widgets in a nice layout
+controls = pn.Column(
+    "## Dashboard Controls",
+    *[
+        widget for widget in [select_var, select_group]
+    ],  # ADVANCED FEATURE: Using * operator to unpack a list into arguments
+    sizing_mode="stretch_width",
+)
+
+
+
+@pn.depends(select_var, select_group)
+
+## BOX PLOT
+def box_plot(select_var, select_group):
+    """Creates an interactive box plot with outlier detection and hover tooltips.
+
+    This is a more sophisticated version of a basic box plot that includes:
+    - Outlier detection
+    - Hover tooltips with statistics
+    - Color coding by group
+
+    Args:
+        select_var (str): Variable to plot on y-axis
+        select_group (str): Grouping variable for x-axis
+
+    Returns:
+        hvplot: Interactive box plot
+    """
+
+    # ADVANCED FEATURE: Dictionary comprehension for statistics
+    # Calculate statistics for hover tooltips
+    stats = {
+        group: {
+            "median": df[df[select_group] == group][select_var].median(),
+            "mean": df[df[select_group] == group][select_var].mean(),
+            "std": df[df[select_group] == group][select_var].std(),
+        }
+        for group in df[select_group].unique()
+    }
+
+
+    # Create the box plot with extensive customization
+    plot = df.hvplot.box(
+        y=select_var,
+        by=select_group,
+        height=300,
+        box_fill_color="category",  # Color boxes by category
+        whisker_color="black",  # Make whiskers black for contrast
+        title=f"Distribution of {select_var} by {select_group}",
+        # ADVANCED FEATURE: Use a generator expression for hover tooltips
+        hover_cols=list(col for col in df.columns if df[col].nunique() < 11),
+        # Customize the appearance
+        box_alpha=0.3,  # Slight transparency
+        outlier_alpha=0.3,  # Match outlier transparency
+        width=400,  # Fixed width
+        legend="top",  # Move legend to top
+        # Add statistical annotations
+        tools=["hover"],  # Enable hover tool
+        hover_tooltips=[
+            ("Group", "@{" + select_group + "}"),
+            ("Value", "@{" + select_var + "}{0.00}"),
+            ("Count", "@count"),
+            ("Median", "@median{0.00}"),
+        ],
+    )
+
+    return plot
+
+# ADVANCED FEATURE: Using decorators for reactivity!
+@pn.depends(select_var, select_group)
+
+## HISTOGRAM
+def histogram_plot(select_var, select_group):
+    """
+    Creates an interactive histogram with density curves
+    Args:
+        select_var (str): The variable to plot
+        select_group (str): The grouping variable
+    Returns:
+        hvplot: Interactive histogram plot
+    """
+
+    # create customized histogram
+    plot = df.hvplot.hist(
+        y=select_var,  # What to plot
+        by=select_group,  # How to group it
+        bins=20,  # Number of bins
+        height=300,  # Plot height
+        alpha=0.6,  # Transparency
+        title=f"Distribution of {select_var}",  # Dynamic title
+        xlabel=select_var,  # X-axis label
+        ylabel="Count",  # Y-axis label
+        # ADVANCED FEATURE: Dictionary unpacking for style
+        **{
+            "responsive": True,  # Make it responsive
+        },
+    )
+
+    return plot
+
+# ADVANCED FEATURE: Using decorators for reactivity!
+@pn.depends(select_var, size_var, select_group)
+
+## SCATTER
+def create_scatter(x_var, size_var, group_var):
+    # Determine the y-variable
+    y_var = "covid_deaths" if x_var != "covid_deaths" else "total_deaths"
+
+    # Scale the point sizes for better visibility
+    df["point_size"] = (
+        (df[size_var] - df[size_var].min()) / (df[size_var].max() - df[size_var].min())
+    ) * 350 + 50
+
+    # Identify unique groups
+    groups = df[group_var].unique()
+    # Assign a palette of colors
+    colors = Category10[min(len(groups), 10)]
+
+    combined = None
+
+    for i, g in enumerate(groups):
+        group_data = df[df[group_var] == g]
+
+        # Create scatter plot for this group
+        scatter = group_data.hvplot.scatter(
+            x=x_var,
+            y=y_var,
+            size="point_size",
+            alpha=0.6,
+            color=colors[i % len(colors)],
+            label=str(g),
+        )
+
+        # Combine with previous groups
+        if combined is None:
+            combined = scatter
+        else:
+            combined = combined * scatter
+
+    # Add options to the combined plot
+    if combined is not None:
+        combined = combined.opts(
+            width=400,
+            height=300,
+            title=f"Relationship between {x_var} and {y_var}\n(Point size based on {size_var}, grouped by {group_var})",
+            tools=["hover", "box_zoom", "reset"],
+            show_grid=True,
+            toolbar="above",
+        )
+
+    return combined
+
+# write a Responsive Dashboard class so that we can create dashboards
+warnings.filterwarnings('ignore')
+
+class ResponsiveTabbedDashboard:
+    def __init__(self, widgets, plots):
+        self.widgets = widgets
+        self.plots = plots
+        self._layout = self.create_layout()
+
+    def create_layout(self):
+        sidebar = pn.Column(*self.widgets, sizing_mode="stretch_width")
+
+        tabs = pn.Tabs(
+            (
+                "Overview",
+                pn.Column(
+                    pn.Row(
+                        self.plots["boxplot"],
+                        self.plots["histogram"],
+                        sizing_mode="stretch_both",
+                    ),
+                    sizing_mode="stretch_both",
+                ),
+            ),
+            (
+                "Relationships",
+                pn.Row(self.plots["scatter"], sizing_mode="stretch_both"),
+            ),
+            ("Statistics", pn.Column(self.plots["stats"], sizing_mode="stretch_both")),
+            sizing_mode="stretch_both",
+        )
+
+        main_layout = pn.Column(tabs, sizing_mode="stretch_both")
+
+        template = pn.template.VanillaTemplate(
+            title="Interactive EDA Dashboard",
+            sidebar=[sidebar],
+            main=[main_layout],
+        )
+        return template
+
+    def view(self):
+        return self._layout
+
+
+dashboard = ResponsiveTabbedDashboard(
+    widgets=[select_var, select_group, size_var],
+    plots={
+        "histogram": histogram_plot,
+        "boxplot": box_plot,
+        "scatter": create_scatter,
+        "stats": pd.DataFrame(data_summary),
+    },
+)
+
+# view the dashboard
+dashboard.view()
